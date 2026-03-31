@@ -172,41 +172,49 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 		return
 	}
 
-	log.Printf("[main] 抓取到 %d 个候选代理，开始严格验证...", len(candidates))
+	// 按协议分组
+	var httpCandidates, socks5Candidates []storage.Proxy
+	for _, c := range candidates {
+		if c.Protocol == "http" {
+			httpCandidates = append(httpCandidates, c)
+		} else {
+			socks5Candidates = append(socks5Candidates, c)
+		}
+	}
 
-	// 严格验证并尝试入池
-	addedCount := 0
-	validCount := 0
-	rejectedNoExit := 0
-	rejectedLatency := 0
-	rejectedGeo := 0
-	rejectedFull := 0
+	log.Printf("[main] 抓取到 %d 个候选代理（SOCKS5=%d HTTP=%d），按协议并发验证...",
+		len(candidates), len(socks5Candidates), len(httpCandidates))
 
-	for result := range validate.ValidateStream(candidates) {
+	// 共享计数器
+	var addedCount atomic.Int32
+	var validCount atomic.Int32
+	var rejectedNoExit atomic.Int32
+	var rejectedLatency atomic.Int32
+	var rejectedGeo atomic.Int32
+	var rejectedFull atomic.Int32
+
+	// 入池处理函数（两个协程共用）
+	processResult := func(result validator.Result) {
 		if !result.Valid {
-			continue
+			return
 		}
 
-		validCount++
+		validCount.Add(1)
 		latencyMs := int(result.Latency.Milliseconds())
 
-		// 根据池子状态动态调整延迟标准
 		cfg := config.Get()
 		maxLatency := cfg.GetLatencyThreshold(status.State)
 
-		// 检查：有出口IP、有位置
 		if result.ExitIP == "" || result.ExitLocation == "" {
-			rejectedNoExit++
-			continue
+			rejectedNoExit.Add(1)
+			return
 		}
 
-		// 检查：延迟达标
 		if latencyMs > maxLatency {
-			rejectedLatency++
-			continue
+			rejectedLatency.Add(1)
+			return
 		}
 
-		// 尝试加入池子
 		proxyToAdd := storage.Proxy{
 			Address:      result.Proxy.Address,
 			Protocol:     result.Proxy.Protocol,
@@ -216,41 +224,71 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 		}
 
 		if added, reason := poolMgr.TryAddProxy(proxyToAdd); added {
-			addedCount++
+			addedCount.Add(1)
 		} else if reason == "slots_full" {
-			rejectedFull++
+			rejectedFull.Add(1)
 		} else if len(result.ExitLocation) >= 2 {
-			// 检查是否被地理过滤
 			countryCode := result.ExitLocation[:2]
 			for _, blocked := range cfg.BlockedCountries {
 				if countryCode == blocked {
-					rejectedGeo++
+					rejectedGeo.Add(1)
 					break
 				}
 			}
 		}
-
-		// 如果是紧急模式且已达到最小要求，停止验证
-		if mode == "emergency" && status.HTTP >= cfg.PoolMinPerProtocol && status.SOCKS5 >= cfg.PoolMinPerProtocol {
-			log.Println("[main] 🎉 紧急模式：达到最小要求，停止验证")
-			break
-		}
-
-		// 动态检查是否已经填满
-		if addedCount > 0 && addedCount%20 == 0 {
-			currentStatus, _ := poolMgr.GetStatus()
-			if !poolMgr.NeedsFetchQuick(currentStatus) {
-				log.Println("[main] ✅ 池子已填满，停止验证")
-				break
-			}
-		}
 	}
+
+	// 池子是否已满的检查函数
+	poolFilled := func() bool {
+		currentStatus, _ := poolMgr.GetStatus()
+		return !poolMgr.NeedsFetchQuick(currentStatus)
+	}
+
+	var wg sync.WaitGroup
+
+	// SOCKS5 协程：验证快，优先填充
+	if len(socks5Candidates) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			count := 0
+			for result := range validate.ValidateStream(socks5Candidates) {
+				processResult(result)
+				count++
+				if count%20 == 0 && poolFilled() {
+					log.Println("[main] ✅ SOCKS5 验证中检测到池子已满，停止")
+					break
+				}
+			}
+			log.Printf("[main] SOCKS5 验证完成，处理 %d 个", count)
+		}()
+	}
+
+	// HTTP 协程：有额外 HTTPS 检测，较慢
+	if len(httpCandidates) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			count := 0
+			for result := range validate.ValidateStream(httpCandidates) {
+				processResult(result)
+				count++
+				if count%20 == 0 && poolFilled() {
+					log.Println("[main] ✅ HTTP 验证中检测到池子已满，停止")
+					break
+				}
+			}
+			log.Printf("[main] HTTP 验证完成，处理 %d 个", count)
+		}()
+	}
+
+	wg.Wait()
 
 	// 最终状态
 	finalStatus, _ := poolMgr.GetStatus()
 	log.Printf("[main] 填充完成: 验证%d 通过%d 入池%d | 拒绝[无出口:%d 延迟:%d 地理:%d 满:%d] | 最终: %s HTTP=%d SOCKS5=%d",
-		len(candidates), validCount, addedCount,
-		rejectedNoExit, rejectedLatency, rejectedGeo, rejectedFull,
+		len(candidates), validCount.Load(), addedCount.Load(),
+		rejectedNoExit.Load(), rejectedLatency.Load(), rejectedGeo.Load(), rejectedFull.Load(),
 		finalStatus.State, finalStatus.HTTP, finalStatus.SOCKS5)
 }
 

@@ -161,7 +161,7 @@ func DefaultConfig() *Config {
 
 		// 池子容量配置
 		PoolMaxSize:        100,  // 总容量
-		PoolHTTPRatio:      0.5,  // HTTP占50%
+		PoolHTTPRatio:      0.3,  // HTTP占30%
 		PoolMinPerProtocol: 10,   // 每协议最少10个
 
 		// 延迟标准配置

@@ -83,6 +83,52 @@ func getExitIPInfo(client *http.Client) (string, string) {
 	return result.Query, location
 }
 
+// HTTPS 测试目标列表，随机选一个验证代理的 CONNECT 隧道能力
+var httpsTestTargets = []string{
+	"https://www.google.com",
+	"https://www.openai.com",
+	"https://www.github.com",
+	"https://www.cloudflare.com",
+	"https://httpbin.org/ip",
+}
+
+// checkHTTPSConnect 通过 HTTP 代理实际访问一个随机 HTTPS 网站，验证 CONNECT 隧道是否可用
+// 首次失败会换一个目标重试一次，避免目标网站偶尔抽风导致误杀
+func checkHTTPSConnect(proxyAddr string, timeout time.Duration) bool {
+	proxyURL, err := url.Parse(fmt.Sprintf("http://%s", proxyAddr))
+	if err != nil {
+		return false
+	}
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Proxy:               http.ProxyURL(proxyURL),
+			TLSHandshakeTimeout: timeout,
+		},
+		Timeout: timeout,
+	}
+
+	// 随机起始索引
+	start := int(time.Now().UnixNano() % int64(len(httpsTestTargets)))
+
+	for attempt := 0; attempt < 2; attempt++ {
+		idx := (start + attempt) % len(httpsTestTargets)
+		resp, err := client.Get(httpsTestTargets[idx])
+		if err != nil {
+			continue
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		// 2xx 或 3xx 都算成功（部分网站会重定向）
+		if resp.StatusCode >= 200 && resp.StatusCode < 400 {
+			return true
+		}
+	}
+
+	return false
+}
+
 // ValidateAll 并发验证所有代理，返回验证结果
 func (v *Validator) ValidateAll(proxies []storage.Proxy) []Result {
 	var results []Result
@@ -169,6 +215,13 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 			if countryCode == blocked {
 				return false, latency, exitIP, exitLocation
 			}
+		}
+	}
+
+	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
+	if p.Protocol == "http" {
+		if !checkHTTPSConnect(p.Address, v.timeout) {
+			return false, latency, exitIP, exitLocation
 		}
 	}
 
