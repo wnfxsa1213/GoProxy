@@ -51,14 +51,16 @@ type Result struct {
 	Latency      time.Duration
 	ExitIP       string
 	ExitLocation string
+	CountryCode  string
+	Timezone     string
 }
 
 // getExitIPInfo 通过代理获取出口 IP 和地理位置
-func getExitIPInfo(client *http.Client) (string, string) {
+func getExitIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, timezone string) {
 	// 使用 ip-api.com 返回 JSON 格式的 IP 信息
-	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query")
+	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query,timezone")
 	if err != nil {
-		return "", ""
+		return "", "", "", ""
 	}
 	defer resp.Body.Close()
 
@@ -68,19 +70,20 @@ func getExitIPInfo(client *http.Client) (string, string) {
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
 		City        string `json:"city"`
+		Timezone    string `json:"timezone"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.Status != "success" {
-		return "", ""
+		return "", "", "", ""
 	}
 
-	// 返回格式：IP, "国家代码 城市"
+	// 返回格式：IP, "国家代码 城市", 国家代码, 时区
 	location := result.CountryCode
 	if result.City != "" {
 		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
 	}
-	
-	return result.Query, location
+
+	return result.Query, location, result.CountryCode, result.Timezone
 }
 
 // HTTPS 测试目标列表，随机选一个验证代理的 CONNECT 隧道能力
@@ -151,8 +154,8 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 			go func(px storage.Proxy) {
 				defer wg.Done()
 				defer func() { <-sem }()
-				valid, latency, exitIP, exitLocation := v.ValidateOne(px)
-				ch <- Result{Proxy: px, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation}
+				valid, latency, exitIP, exitLocation, countryCode, tz := v.ValidateOne(px)
+				ch <- Result{Proxy: px, Valid: valid, Latency: latency, ExitIP: exitIP, ExitLocation: exitLocation, CountryCode: countryCode, Timezone: tz}
 			}(p)
 		}
 		wg.Wait()
@@ -162,8 +165,8 @@ func (v *Validator) ValidateStream(proxies []storage.Proxy) <-chan Result {
 	return ch
 }
 
-// ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP和地理位置
-func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string) {
+// ValidateOne 验证单个代理是否可用，返回是否有效、延迟、出口IP、地理位置、国家代码、时区
+func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, string, string, string) {
 	var client *http.Client
 	var err error
 
@@ -174,46 +177,45 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		client, err = newSOCKS5Client(p.Address, v.timeout)
 	default:
 		log.Printf("unknown protocol %s for %s", p.Protocol, p.Address)
-		return false, 0, "", ""
+		return false, 0, "", "", "", ""
 	}
 
 	if err != nil {
-		return false, 0, "", ""
+		return false, 0, "", "", "", ""
 	}
 
 	start := time.Now()
 	resp, err := client.Get(v.validateURL)
 	latency := time.Since(start)
 	if err != nil {
-		return false, 0, "", ""
+		return false, 0, "", "", "", ""
 	}
 	defer resp.Body.Close()
 	io.Copy(io.Discard, resp.Body)
 
 	// 验证状态码（200 或 204 都接受）
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return false, latency, "", ""
+		return false, latency, "", "", "", ""
 	}
 
 	// 响应时间过滤
 	if v.maxResponseMs > 0 && latency > time.Duration(v.maxResponseMs)*time.Millisecond {
-		return false, latency, "", ""
+		return false, latency, "", "", "", ""
 	}
 
 	// 获取出口 IP 和地理位置（仅在验证通过时）
-	exitIP, exitLocation := getExitIPInfo(client)
-	
+	exitIP, exitLocation, countryCode, timezone := getExitIPInfo(client)
+
 	// 必须能获取到出口信息
 	if exitIP == "" || exitLocation == "" {
-		return false, latency, exitIP, exitLocation
+		return false, latency, exitIP, exitLocation, countryCode, timezone
 	}
-	
+
 	// 过滤屏蔽国家出口（根据配置）
-	if v.cfg != nil && len(v.cfg.BlockedCountries) > 0 && len(exitLocation) >= 2 {
-		countryCode := exitLocation[:2]
+	if v.cfg != nil && len(v.cfg.BlockedCountries) > 0 && countryCode != "" {
 		for _, blocked := range v.cfg.BlockedCountries {
 			if countryCode == blocked {
-				return false, latency, exitIP, exitLocation
+				return false, latency, exitIP, exitLocation, countryCode, timezone
 			}
 		}
 	}
@@ -221,11 +223,11 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
 	if p.Protocol == "http" {
 		if !checkHTTPSConnect(p.Address, v.timeout) {
-			return false, latency, exitIP, exitLocation
+			return false, latency, exitIP, exitLocation, countryCode, timezone
 		}
 	}
 
-	return true, latency, exitIP, exitLocation
+	return true, latency, exitIP, exitLocation, countryCode, timezone
 }
 
 func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) {

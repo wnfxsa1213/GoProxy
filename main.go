@@ -2,9 +2,12 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
+	"os/signal"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"goproxy/checker"
@@ -14,6 +17,7 @@ import (
 	"goproxy/optimizer"
 	"goproxy/pool"
 	"goproxy/proxy"
+	"goproxy/session"
 	"goproxy/storage"
 	"goproxy/validator"
 	"goproxy/webui"
@@ -78,14 +82,26 @@ func main() {
 	socks5RandomServer := proxy.NewSOCKS5(store, cfg, "random", cfg.SOCKS5Port)
 	socks5StableServer := proxy.NewSOCKS5(store, cfg, "lowest-latency", cfg.StableSOCKS5Port)
 
+	// 初始化 Session-Sticky 模块
+	sessionStore := session.NewStore(store.GetDB())
+	sessionMgr := session.NewManager(sessionStore, store, cfg)
+
+	// 注入租约检查器，保护被会话租用的代理不被删除/替换
+	store.SetLeaseChecker(sessionMgr)
+
+	// 创建 Session API 处理器
+	sessionAPI := session.NewAPIHandler(sessionMgr)
+
 	// 配置变更通知 channel
 	configChanged := make(chan struct{}, 1)
 
-	// 启动 WebUI（传递池子管理器）
+	// 启动 WebUI（传递池子管理器 + Session API 路由）
 	ui := webui.New(store, cfg, poolMgr, func() {
 		go smartFetchAndFill(fetch, validate, store, poolMgr)
 	}, configChanged)
-	ui.Start()
+	ui.Start(func(mux *http.ServeMux) {
+		sessionAPI.RegisterRoutes(mux)
+	})
 
 	// 首次智能填充（清理后立即触发）
 	go func() {
@@ -128,6 +144,35 @@ func main() {
 		if err := socks5RandomServer.Start(); err != nil {
 			log.Fatalf("random socks5 proxy server: %v", err)
 		}
+	}()
+
+	// 启动 Session-Sticky 代理服务
+	sessionMgr.StartExpireChecker()
+
+	sessionSOCKS5 := session.NewSessionSOCKS5Server(sessionMgr, cfg.SessionStickyPort)
+	go func() {
+		if err := sessionSOCKS5.Start(); err != nil {
+			log.Fatalf("session socks5 proxy server: %v", err)
+		}
+	}()
+
+	sessionHTTP := session.NewSessionHTTPServer(sessionMgr, cfg.SessionStickyHTTPPort)
+	go func() {
+		if err := sessionHTTP.Start(); err != nil {
+			log.Fatalf("session http proxy server: %v", err)
+		}
+	}()
+
+	// 优雅停机
+	go func() {
+		sigCh := make(chan os.Signal, 1)
+		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+		sig := <-sigCh
+		log.Printf("[main] 收到信号 %v，开始优雅停机...", sig)
+		sessionMgr.ReleaseAll("shutdown")
+		store.Close()
+		log.Println("[main] 所有会话已释放，数据库已关闭，退出")
+		os.Exit(0)
 	}()
 
 	// 启动 HTTP 随机代理服务（阻塞）
@@ -220,6 +265,8 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 			Protocol:     result.Proxy.Protocol,
 			ExitIP:       result.ExitIP,
 			ExitLocation: result.ExitLocation,
+			CountryCode:  result.CountryCode,
+			Timezone:     result.Timezone,
 			Latency:      latencyMs,
 		}
 
@@ -227,10 +274,9 @@ func smartFetchAndFill(fetch *fetcher.Fetcher, validate *validator.Validator, st
 			addedCount.Add(1)
 		} else if reason == "slots_full" {
 			rejectedFull.Add(1)
-		} else if len(result.ExitLocation) >= 2 {
-			countryCode := result.ExitLocation[:2]
+		} else if result.CountryCode != "" {
 			for _, blocked := range cfg.BlockedCountries {
-				if countryCode == blocked {
+				if result.CountryCode == blocked {
 					rejectedGeo.Add(1)
 					break
 				}

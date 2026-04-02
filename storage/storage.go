@@ -16,6 +16,8 @@ type Proxy struct {
 	Protocol     string    `json:"protocol"`
 	ExitIP       string    `json:"exit_ip"`
 	ExitLocation string    `json:"exit_location"`
+	CountryCode  string    `json:"country_code"`
+	Timezone     string    `json:"timezone"`
 	Latency      int       `json:"latency"`
 	QualityGrade string    `json:"quality_grade"`
 	UseCount     int       `json:"use_count"`
@@ -40,8 +42,20 @@ type SourceStatus struct {
 	DisabledUntil    time.Time
 }
 
+// LeaseChecker 租约检查接口（由 session.Manager 实现）
+type LeaseChecker interface {
+	IsLeased(proxyID int64) bool
+	GetLeasedIDs() []int64
+}
+
 type Storage struct {
-	db *sql.DB
+	db           *sql.DB
+	leaseChecker LeaseChecker
+}
+
+// SetLeaseChecker 设置租约检查器（启动时由 main.go 注入）
+func (s *Storage) SetLeaseChecker(lc LeaseChecker) {
+	s.leaseChecker = lc
 }
 
 func New(dbPath string) (*Storage, error) {
@@ -172,6 +186,55 @@ func (s *Storage) initSchema() error {
 		s.db.Exec(`ALTER TABLE proxies ADD COLUMN status TEXT NOT NULL DEFAULT 'active'`)
 	}
 
+	// 迁移：添加地理信息字段
+	var hasCountryCode int
+	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name='country_code'`).Scan(&hasCountryCode)
+	if hasCountryCode == 0 {
+		log.Println("[storage] migrating: adding country_code and timezone columns")
+		s.db.Exec(`ALTER TABLE proxies ADD COLUMN country_code TEXT NOT NULL DEFAULT ''`)
+		s.db.Exec(`ALTER TABLE proxies ADD COLUMN timezone TEXT NOT NULL DEFAULT ''`)
+	}
+
+	// 创建 sessions 表（会话租约）
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS sessions (
+			id              TEXT PRIMARY KEY,
+			task_id         TEXT NOT NULL,
+			proxy_id        INTEGER NOT NULL,
+			proxy_address   TEXT NOT NULL,
+			protocol        TEXT NOT NULL DEFAULT 'socks5',
+			state           TEXT NOT NULL DEFAULT 'active',
+			version         INTEGER NOT NULL DEFAULT 1,
+			leased_at       INTEGER NOT NULL,
+			expires_at      INTEGER NOT NULL,
+			released_at     INTEGER,
+			result          TEXT,
+			risk_detected   INTEGER NOT NULL DEFAULT 0,
+			created_at      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	// 迁移：修复 sessions task_id 唯一索引（排除空 task_id）
+	s.db.Exec(`DROP INDEX IF EXISTS idx_sessions_task_active`)
+	s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_task_active ON sessions(task_id) WHERE state = 'active' AND task_id != ''`)
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_state ON sessions(state)`)
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_sessions_proxy_id ON sessions(proxy_id)`)
+
+	// 创建代理日使用量表
+	_, err = s.db.Exec(`
+		CREATE TABLE IF NOT EXISTS proxy_usage_daily (
+			proxy_id    INTEGER NOT NULL,
+			usage_date  TEXT NOT NULL,
+			use_count   INTEGER NOT NULL DEFAULT 0,
+			PRIMARY KEY (proxy_id, usage_date)
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -215,31 +278,56 @@ func (s *Storage) AddProxies(proxies []Proxy) error {
 	return tx.Commit()
 }
 
-// GetRandom 随机取一个可用代理（优先选择质量高的）
+// getLeasedSet 获取当前被租用的代理 ID 集合
+func (s *Storage) getLeasedSet() map[int64]bool {
+	if s.leaseChecker == nil {
+		return nil
+	}
+	ids := s.leaseChecker.GetLeasedIDs()
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
+}
+
+// GetRandom 随机取一个可用代理（优先选择质量高的，排除被租用的）
 func (s *Storage) GetRandom() (*Proxy, error) {
+	leased := s.getLeasedSet()
+
 	// 优先从 S/A 级代理中随机选择
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, latency, quality_grade, 
+		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
 		        use_count, success_count, fail_count, last_used, last_check, created_at, status
-		 FROM proxies 
+		 FROM proxies
 		 WHERE status = 'active' AND fail_count < 3
-		 ORDER BY 
-		   CASE quality_grade 
-		     WHEN 'S' THEN 1 
-		     WHEN 'A' THEN 2 
-		     WHEN 'B' THEN 3 
-		     ELSE 4 
+		 ORDER BY
+		   CASE quality_grade
+		     WHEN 'S' THEN 1
+		     WHEN 'A' THEN 2
+		     WHEN 'B' THEN 3
+		     ELSE 4
 		   END,
-		   RANDOM() 
-		 LIMIT 1`,
+		   RANDOM()
+		 LIMIT 10`,
 	)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	if rows.Next() {
-		return scanProxy(rows)
+	for rows.Next() {
+		p, err := scanProxy(rows)
+		if err != nil {
+			return nil, err
+		}
+		if leased != nil && leased[p.ID] {
+			continue
+		}
+		return p, nil
 	}
 	return nil, fmt.Errorf("no available proxy")
 }
@@ -249,6 +337,7 @@ func scanProxy(rows *sql.Rows) (*Proxy, error) {
 	p := &Proxy{}
 	var lastUsed, lastCheck sql.NullTime
 	if err := rows.Scan(&p.ID, &p.Address, &p.Protocol, &p.ExitIP, &p.ExitLocation,
+		&p.CountryCode, &p.Timezone,
 		&p.Latency, &p.QualityGrade, &p.UseCount, &p.SuccessCount, &p.FailCount,
 		&lastUsed, &lastCheck, &p.CreatedAt, &p.Status); err != nil {
 		return nil, err
@@ -262,12 +351,14 @@ func scanProxy(rows *sql.Rows) (*Proxy, error) {
 	return p, nil
 }
 
-// GetAll 获取所有可用代理
+// GetAll 获取所有可用代理（排除被租用的）
 func (s *Storage) GetAll() ([]Proxy, error) {
+	leased := s.getLeasedSet()
+
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, latency, quality_grade,
+		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
 		        use_count, success_count, fail_count, last_used, last_check, created_at, status
-		 FROM proxies 
+		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3
 		 ORDER BY latency ASC`,
 	)
@@ -281,6 +372,9 @@ func (s *Storage) GetAll() ([]Proxy, error) {
 		p, err := scanProxy(rows)
 		if err != nil {
 			return nil, err
+		}
+		if leased != nil && leased[p.ID] {
+			continue
 		}
 		proxies = append(proxies, *p)
 	}
@@ -390,6 +484,15 @@ func (s *Storage) GetLowestLatencyByProtocolExclude(protocol string, excludes []
 
 // Delete 立即删除指定代理
 func (s *Storage) Delete(address string) error {
+	// 保护被会话租用的代理
+	if s.leaseChecker != nil {
+		var id int64
+		s.db.QueryRow(`SELECT id FROM proxies WHERE address = ?`, address).Scan(&id)
+		if id > 0 && s.leaseChecker.IsLeased(id) {
+			log.Printf("[storage] 跳过删除: %s (id=%d) 正在被会话租用", address, id)
+			return nil
+		}
+	}
 	_, err := s.db.Exec(`DELETE FROM proxies WHERE address = ?`, address)
 	return err
 }
@@ -421,12 +524,12 @@ func (s *Storage) UpdateLatency(address string, latencyMs int) error {
 	return err
 }
 
-// UpdateExitInfo 更新代理的出口 IP、位置和质量等级
-func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int) error {
+// UpdateExitInfo 更新代理的出口 IP、位置、地理信息和质量等级
+func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, countryCode, timezone string) error {
 	grade := CalculateQualityGrade(latencyMs)
 	_, err := s.db.Exec(
-		`UPDATE proxies SET exit_ip = ?, exit_location = ?, latency = ?, quality_grade = ? WHERE address = ?`,
-		exitIP, exitLocation, latencyMs, grade, address,
+		`UPDATE proxies SET exit_ip = ?, exit_location = ?, country_code = ?, timezone = ?, latency = ?, quality_grade = ? WHERE address = ?`,
+		exitIP, exitLocation, countryCode, timezone, latencyMs, grade, address,
 	)
 	return err
 }
@@ -452,7 +555,7 @@ func (s *Storage) RecordProxyUse(address string, success bool) error {
 // GetWorstProxies 获取指定协议中延迟最高的N个代理
 func (s *Storage) GetWorstProxies(protocol string, limit int) ([]Proxy, error) {
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, latency, quality_grade,
+		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
 		        use_count, success_count, fail_count, last_used, last_check, created_at, status
 		 FROM proxies 
 		 WHERE protocol = ? AND status = 'active' 
@@ -479,6 +582,16 @@ func (s *Storage) GetWorstProxies(protocol string, limit int) ([]Proxy, error) {
 
 // ReplaceProxy 替换代理（删除旧的，添加新的）
 func (s *Storage) ReplaceProxy(oldAddress string, newProxy Proxy) error {
+	// 保护被会话租用的代理
+	if s.leaseChecker != nil {
+		var id int64
+		s.db.QueryRow(`SELECT id FROM proxies WHERE address = ?`, oldAddress).Scan(&id)
+		if id > 0 && s.leaseChecker.IsLeased(id) {
+			log.Printf("[storage] 跳过替换: %s (id=%d) 正在被会话租用", oldAddress, id)
+			return fmt.Errorf("proxy is leased")
+		}
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -494,9 +607,9 @@ func (s *Storage) ReplaceProxy(oldAddress string, newProxy Proxy) error {
 	// 添加新代理（带完整信息）
 	grade := CalculateQualityGrade(newProxy.Latency)
 	_, err = tx.Exec(
-		`INSERT INTO proxies (address, protocol, exit_ip, exit_location, latency, quality_grade, status) 
-		 VALUES (?, ?, ?, ?, ?, ?, 'active')`,
-		newProxy.Address, newProxy.Protocol, newProxy.ExitIP, newProxy.ExitLocation, newProxy.Latency, grade,
+		`INSERT INTO proxies (address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+		newProxy.Address, newProxy.Protocol, newProxy.ExitIP, newProxy.ExitLocation, newProxy.CountryCode, newProxy.Timezone, newProxy.Latency, grade,
 	)
 	if err != nil {
 		return err
@@ -560,23 +673,31 @@ func (s *Storage) GetQualityDistribution() (map[string]int, error) {
 	return dist, nil
 }
 
-// GetBatchForHealthCheck 获取一批需要健康检查的代理
+// GetBatchForHealthCheck 获取一批需要健康检查的代理（排除被租用的）
 func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Proxy, error) {
-	query := `SELECT id, address, protocol, exit_ip, exit_location, latency, quality_grade,
+	leased := s.getLeasedSet()
+
+	// 多查一些以补偿过滤掉的租用代理
+	fetchSize := batchSize
+	if leased != nil {
+		fetchSize += len(leased)
+	}
+
+	query := `SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
 		        use_count, success_count, fail_count, last_used, last_check, created_at, status
-		 FROM proxies 
+		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
 
 	if skipSGrade {
 		query += ` AND quality_grade != 'S'`
 	}
 
-	query += ` ORDER BY 
+	query += ` ORDER BY
 		COALESCE(last_check, '1970-01-01') ASC,
 		quality_grade DESC
 		LIMIT ?`
 
-	rows, err := s.db.Query(query, batchSize)
+	rows, err := s.db.Query(query, fetchSize)
 	if err != nil {
 		return nil, err
 	}
@@ -588,7 +709,13 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 		if err != nil {
 			return nil, err
 		}
+		if leased != nil && leased[p.ID] {
+			continue
+		}
 		proxies = append(proxies, *p)
+		if len(proxies) >= batchSize {
+			break
+		}
 	}
 	return proxies, nil
 }
@@ -676,7 +803,7 @@ func (s *Storage) IncrementFailCount(address string) error {
 // GetByProtocol 按协议获取代理列表
 func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, latency, quality_grade,
+		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
 		        use_count, success_count, fail_count, last_used, last_check, created_at, status
 		 FROM proxies 
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3 AND protocol = ?

@@ -61,20 +61,23 @@ func New(s *storage.Storage, cfg *config.Config, pm *pool.Manager, ft FetchTrigg
 	}
 }
 
-func (s *Server) Start() {
+// RouteRegistrar 外部路由注册函数
+type RouteRegistrar func(mux *http.ServeMux)
+
+func (s *Server) Start(registrars ...RouteRegistrar) {
 	mux := http.NewServeMux()
-	
+
 	// 添加日志中间件
 	loggedMux := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("[webui] %s %s | Host: %s | RemoteAddr: %s", 
+		log.Printf("[webui] %s %s | Host: %s | RemoteAddr: %s",
 			r.Method, r.URL.Path, r.Host, r.RemoteAddr)
 		mux.ServeHTTP(w, r)
 	})
-	
+
 	mux.HandleFunc("/", s.handleIndex)
 	mux.HandleFunc("/login", s.handleLogin)
 	mux.HandleFunc("/logout", s.handleLogout)
-	
+
 	// 只读 API（访客可访问）
 	mux.HandleFunc("/api/stats", s.readOnlyMiddleware(s.apiStats))
 	mux.HandleFunc("/api/proxies", s.readOnlyMiddleware(s.apiProxies))
@@ -83,13 +86,18 @@ func (s *Server) Start() {
 	mux.HandleFunc("/api/pool/quality", s.readOnlyMiddleware(s.apiQualityDistribution))
 	mux.HandleFunc("/api/config", s.readOnlyMiddleware(s.apiConfig))
 	mux.HandleFunc("/api/auth/check", s.apiAuthCheck) // 检查登录状态
-	
+
 	// 管理员 API（需要登录）
 	mux.HandleFunc("/api/proxy/delete", s.authMiddleware(s.apiDeleteProxy))
 	mux.HandleFunc("/api/proxy/refresh", s.authMiddleware(s.apiRefreshProxy))
 	mux.HandleFunc("/api/fetch", s.authMiddleware(s.apiFetch))
 	mux.HandleFunc("/api/refresh-latency", s.authMiddleware(s.apiRefreshLatency))
 	mux.HandleFunc("/api/config/save", s.authMiddleware(s.apiConfigSave))
+
+	// 注册外部路由（如 Session API）
+	for _, reg := range registrars {
+		reg(mux)
+	}
 
 	log.Printf("WebUI listening on %s", s.cfg.WebUIPort)
 	go func() {
@@ -259,11 +267,11 @@ func (s *Server) apiRefreshProxy(w http.ResponseWriter, r *http.Request) {
 		v := validator.New(1, cfg.ValidateTimeout, cfg.ValidateURL)
 		
 		log.Printf("[webui] refreshing proxy: %s", req.Address)
-		valid, latency, exitIP, exitLocation := v.ValidateOne(*targetProxy)
-		
+		valid, latency, exitIP, exitLocation, countryCode, tz := v.ValidateOne(*targetProxy)
+
 		if valid {
 			latencyMs := int(latency.Milliseconds())
-			s.storage.UpdateExitInfo(req.Address, exitIP, exitLocation, latencyMs)
+			s.storage.UpdateExitInfo(req.Address, exitIP, exitLocation, latencyMs, countryCode, tz)
 			log.Printf("[webui] proxy refreshed: %s latency=%dms grade=%s", req.Address, latencyMs, storage.CalculateQualityGrade(latencyMs))
 		} else {
 			s.storage.Delete(req.Address)
@@ -308,7 +316,7 @@ func (s *Server) apiRefreshLatency(w http.ResponseWriter, r *http.Request) {
 		for r := range validate.ValidateStream(proxies) {
 			if r.Valid {
 				latencyMs := int(r.Latency.Milliseconds())
-				s.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs)
+				s.storage.UpdateExitInfo(r.Proxy.Address, r.ExitIP, r.ExitLocation, latencyMs, r.CountryCode, r.Timezone)
 				updated++
 			} else {
 				s.storage.Delete(r.Proxy.Address)

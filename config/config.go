@@ -93,6 +93,16 @@ type Config struct {
 	FetchInterval int // 已废弃，由智能抓取器管理
 	CheckInterval int // 已废弃，由 HealthCheckInterval 替代
 
+	// ========== Session-Sticky 配置 ==========
+	SessionAPIKey          string // Session API 鉴权密钥（环境变量 SESSION_API_KEY）
+	SessionStickyPort      string // Session SOCKS5 端口（默认 :7781）
+	SessionStickyHTTPPort  string // Session HTTP 端口（默认 :7782）
+	SessionMinCooldownMin  int    // 最小冷却时间（分钟，默认 30）
+	SessionMaxDailyUses    int    // 单 IP 日使用上限（默认 3）
+	SessionMaxConcurrent   int    // 最大并发会话数（默认 50）
+	SessionAdvertiseHost   string // 对外宣告地址（默认空=自动检测）
+	SessionRiskCooldownMin int    // 风控触发后冷却时间（分钟，默认 120）
+
 	// 代理来源 URL（已废弃，内置多源）
 	HTTPSourceURL   string
 	SOCKS5SourceURL string
@@ -140,6 +150,10 @@ func DefaultConfig() *Config {
 		}
 	}
 	
+	// 读取 Session API 配置
+	sessionAPIKey := os.Getenv("SESSION_API_KEY")
+	sessionAdvertiseHost := os.Getenv("SESSION_ADVERTISE_HOST")
+
 	return &Config{
 		// 基础服务配置
 		WebUIPort:         ":7778",
@@ -201,6 +215,16 @@ func DefaultConfig() *Config {
 		CheckInterval: 10,
 		HTTPSourceURL: "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt",
 		SOCKS5SourceURL: "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/socks5.txt",
+
+		// Session-Sticky 配置
+		SessionAPIKey:          sessionAPIKey,
+		SessionStickyPort:      ":7781",
+		SessionStickyHTTPPort:  ":7782",
+		SessionMinCooldownMin:  30,
+		SessionMaxDailyUses:    3,
+		SessionMaxConcurrent:   50,
+		SessionAdvertiseHost:   sessionAdvertiseHost,
+		SessionRiskCooldownMin: 120,
 	}
 }
 
