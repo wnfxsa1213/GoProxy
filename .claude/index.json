@@ -1,0 +1,135 @@
+{
+  "timestamp": "2026-04-01T22:05:50+08:00",
+  "project": "GoProxy",
+  "description": "智能代理池系统 - 自动抓取/验证/管理 HTTP/SOCKS5 代理",
+  "language": "Go",
+  "go_version": "1.25.0",
+  "module_name": "goproxy",
+  "root_claude_md": "CLAUDE.md",
+  "modules": [
+    {
+      "path": "config",
+      "description": "全局配置管理（环境变量 + config.json），线程安全单例",
+      "entry": "config/config.go",
+      "interfaces": ["Load", "Get", "Save", "DefaultConfig", "CalculateSlots", "GetLatencyThreshold"],
+      "tests": [],
+      "important_files": ["config/config.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "storage",
+      "description": "SQLite 持久化层（proxies + source_status 表）",
+      "entry": "storage/storage.go",
+      "interfaces": ["New", "AddProxy", "GetAll", "GetRandom", "Delete", "UpdateExitInfo", "ReplaceProxy", "GetQualityDistribution", "GetBatchForHealthCheck"],
+      "tests": [],
+      "important_files": ["storage/storage.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "fetcher",
+      "description": "多源代理抓取器，含断路器和 IP 查询限流",
+      "entry": "fetcher/fetcher.go",
+      "interfaces": ["New", "Fetch", "FetchSmart"],
+      "tests": [],
+      "important_files": ["fetcher/fetcher.go", "fetcher/source_manager.go", "fetcher/ip_query.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "validator",
+      "description": "并发代理验证（连通性 + 出口 IP + 地理位置 + 延迟 + HTTPS 隧道）",
+      "entry": "validator/validator.go",
+      "interfaces": ["New", "ValidateAll", "ValidateStream", "ValidateOne"],
+      "tests": [],
+      "important_files": ["validator/validator.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "pool",
+      "description": "池子管理器（准入控制、槽位分配、替换逻辑）",
+      "entry": "pool/manager.go",
+      "interfaces": ["NewManager", "GetStatus", "NeedsFetch", "TryAddProxy", "AdjustForConfigChange"],
+      "tests": [],
+      "important_files": ["pool/manager.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "checker",
+      "description": "后台健康检查器（批量验证、跳过 S 级策略）",
+      "entry": "checker/health_checker.go",
+      "interfaces": ["NewHealthChecker", "RunOnce", "StartBackground"],
+      "tests": [],
+      "important_files": ["checker/checker.go", "checker/health_checker.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "optimizer",
+      "description": "后台质量优化器（替换慢代理为更快的）",
+      "entry": "optimizer/optimizer.go",
+      "interfaces": ["NewOptimizer", "RunOnce", "StartBackground"],
+      "tests": [],
+      "important_files": ["optimizer/optimizer.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "proxy",
+      "description": "对外代理服务器（HTTP + SOCKS5，随机/最低延迟模式）",
+      "entry": "proxy/server.go",
+      "interfaces": ["New", "NewSOCKS5", "Start", "ServeHTTP"],
+      "tests": [],
+      "important_files": ["proxy/server.go", "proxy/socks5_server.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "webui",
+      "description": "WebUI 仪表盘（嵌入式 HTML + REST API + 双角色认证）",
+      "entry": "webui/server.go",
+      "interfaces": ["New", "Start"],
+      "tests": [],
+      "important_files": ["webui/server.go", "webui/dashboard.go", "webui/html.go"],
+      "coverage": "full",
+      "gaps": ["html.go 为大文件，仅记录路径未读全部内容"]
+    },
+    {
+      "path": "logger",
+      "description": "内存日志收集器，供 WebUI 实时展示",
+      "entry": "logger/logger.go",
+      "interfaces": ["Init", "GetLines"],
+      "tests": [],
+      "important_files": ["logger/logger.go"],
+      "coverage": "full",
+      "gaps": []
+    },
+    {
+      "path": "test",
+      "description": "集成测试脚本（Shell/Go/Python），需运行实例配合",
+      "entry": null,
+      "interfaces": [],
+      "tests": ["test/test_proxy.sh", "test/test_http_https.sh", "test/test_socks5.sh", "test/test_proxy.go", "test/test_proxy.py"],
+      "important_files": ["test/test_proxy.sh", "test/test_http_https.sh", "test/test_socks5.sh", "test/test_proxy.go", "test/test_proxy.py"],
+      "coverage": "full",
+      "gaps": []
+    }
+  ],
+  "scan_stats": {
+    "total_files": 29,
+    "scanned_files": 29,
+    "coverage_percent": 100,
+    "ignored_patterns": [".DS_Store", "vendor/", "*.db", "*.log", "config.json", "data/", ".env", ".idea/", ".vscode/", ".cursor/"],
+    "skipped_large_files": ["webui/html.go (49.4KB, 嵌入式前端 HTML)"],
+    "truncated": false
+  },
+  "gap_summary": {
+    "missing_unit_tests": true,
+    "missing_api_docs": false,
+    "missing_data_model_docs": false,
+    "notes": "项目无 Go 单元测试，仅有集成测试脚本。所有模块已完整扫描。"
+  }
+}
