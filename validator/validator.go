@@ -66,7 +66,7 @@ func getExitIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, time
 
 	var result struct {
 		Status      string `json:"status"`
-		Query       string `json:"query"`       // IP 地址
+		Query       string `json:"query"` // IP 地址
 		Country     string `json:"country"`
 		CountryCode string `json:"countryCode"`
 		City        string `json:"city"`
@@ -95,22 +95,9 @@ var httpsTestTargets = []string{
 	"https://httpbin.org/ip",
 }
 
-// checkHTTPSConnect 通过 HTTP 代理实际访问一个随机 HTTPS 网站，验证 CONNECT 隧道是否可用
-// 首次失败会换一个目标重试一次，避免目标网站偶尔抽风导致误杀
-func checkHTTPSConnect(proxyAddr string, timeout time.Duration) bool {
-	proxyURL, err := url.Parse(fmt.Sprintf("http://%s", proxyAddr))
-	if err != nil {
-		return false
-	}
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyURL(proxyURL),
-			TLSHandshakeTimeout: timeout,
-		},
-		Timeout: timeout,
-	}
-
+// checkHTTPSReachability 通过代理实际访问 HTTPS 站点，验证 TLS 握手和证书链可信性。
+// 首次失败会换一个目标重试一次，避免目标网站偶尔抽风导致误杀。
+func checkHTTPSReachability(client *http.Client) bool {
 	// 随机起始索引
 	start := int(time.Now().UnixNano() % int64(len(httpsTestTargets)))
 
@@ -220,11 +207,9 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 		}
 	}
 
-	// HTTP 代理额外检测：必须支持 HTTPS CONNECT 隧道
-	if p.Protocol == "http" {
-		if !checkHTTPSConnect(p.Address, v.timeout) {
-			return false, latency, exitIP, exitLocation, countryCode, timezone
-		}
+	// 对所有可分配代理都做真实 HTTPS 校验，防止把 TLS 证书链异常的上游发给业务流量
+	if !checkHTTPSReachability(client) {
+		return false, latency, exitIP, exitLocation, countryCode, timezone
 	}
 
 	return true, latency, exitIP, exitLocation, countryCode, timezone
@@ -237,7 +222,8 @@ func newHTTPClient(address string, timeout time.Duration) (*http.Client, error) 
 	}
 	return &http.Client{
 		Transport: &http.Transport{
-			Proxy: http.ProxyURL(proxyURL),
+			Proxy:               http.ProxyURL(proxyURL),
+			TLSHandshakeTimeout: timeout,
 		},
 		Timeout: timeout,
 	}, nil
@@ -250,7 +236,8 @@ func newSOCKS5Client(address string, timeout time.Duration) (*http.Client, error
 	}
 	return &http.Client{
 		Transport: &http.Transport{
-			Dial: dialer.Dial,
+			Dial:                dialer.Dial,
+			TLSHandshakeTimeout: timeout,
 		},
 		Timeout: timeout,
 	}, nil

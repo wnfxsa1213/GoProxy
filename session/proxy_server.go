@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/net/proxy"
 	"goproxy/config"
+	"goproxy/internal/netutil"
 )
 
 // SessionSOCKS5Server Session-Sticky SOCKS5 代理服务器（端口 7781）
@@ -432,7 +433,7 @@ func dialViaUpstream(proxyAddr, protocol, target string) (net.Conn, error) {
 		}
 
 		// 发送 CONNECT 请求
-		host, port, err := net.SplitHostPort(target)
+		host, port, err := netutil.SplitTargetHostPort(target)
 		if err != nil {
 			proxyConn.Close()
 			return nil, err
@@ -571,7 +572,7 @@ func readSOCKS5Request(conn net.Conn) (string, error) {
 	}
 	port := binary.BigEndian.Uint16(buf[portOffset : portOffset+2])
 
-	return fmt.Sprintf("%s:%d", host, port), nil
+	return netutil.JoinTargetHostPort(host, port), nil
 }
 
 // sendSOCKS5Reply 发送 SOCKS5 响应
