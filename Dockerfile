@@ -20,6 +20,6 @@ ENV TZ=Asia/Shanghai
 WORKDIR /app
 COPY --from=builder /app/proxy-pool .
 
-EXPOSE 7776 7777 7778
+EXPOSE 7776 7777 7778 7779 7780 7781 7782
 
 CMD ["./proxy-pool"]

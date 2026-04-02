@@ -15,6 +15,8 @@ services:
       - "${WEBUI_PORT:-7778}:7778"           # WebUI（有登录认证）
       - "${SOCKS5_RANDOM_PORT:-7779}:7779"   # SOCKS5 随机轮换
       - "${SOCKS5_STABLE_PORT:-7780}:7780"   # SOCKS5 最低延迟
+      - "${SESSION_SOCKS5_PORT:-7781}:7781"   # Session-Sticky SOCKS5
+      - "${SESSION_HTTP_PORT:-7782}:7782"     # Session-Sticky HTTP
     volumes:
       - goproxy-data:/app/data
     environment:
@@ -25,6 +27,8 @@ services:
       - PROXY_AUTH_USERNAME=${PROXY_AUTH_USERNAME:-proxy}
       - PROXY_AUTH_PASSWORD=${PROXY_AUTH_PASSWORD}
       - BLOCKED_COUNTRIES=${BLOCKED_COUNTRIES:-CN}
+      - SESSION_API_KEY=${SESSION_API_KEY}
+      - SESSION_ADVERTISE_HOST=${SESSION_ADVERTISE_HOST}
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:7778/"]
       interval: 30s
