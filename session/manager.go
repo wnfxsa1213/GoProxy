@@ -19,10 +19,10 @@ type Manager struct {
 	mu sync.Mutex
 
 	// 内存热状态
-	sessions   map[string]*Session // sessionID → Session
-	byProxy    map[int64]string    // proxyID → sessionID（快速判断是否被租用）
-	byTask     map[string]string   // taskID → sessionID（幂等键）
-	cooldowns  map[int64]int64     // proxyID → cooldown until (unix timestamp)
+	sessions  map[string]*Session // sessionID → Session
+	byProxy   map[int64]string    // proxyID → sessionID（快速判断是否被租用）
+	byTask    map[string]string   // taskID → sessionID（幂等键）
+	cooldowns map[int64]int64     // proxyID → cooldown until (unix timestamp)
 
 	store   *Store
 	storage *storage.Storage
@@ -203,8 +203,8 @@ func (m *Manager) Release(sessionID string, result string, riskDetected bool) (*
 		log.Printf("[session] release: 持久化失败: %v", err)
 	}
 
-	// 调整评分
-	newGrade := m.adjustGrade(sess.ProxyID, sess.Grade, result, riskDetected)
+	// 记录使用结果并重算综合质量
+	newGrade := m.recordProxyOutcome(sess.ProxyID, sess.ProxyAddress, sess.Grade, result, riskDetected)
 
 	log.Printf("[session] release: session=%s result=%s risk=%v duration=%ds grade=%s→%s cooldown=%dmin",
 		sessionID, result, riskDetected, now-sess.LeasedAt, sess.Grade, newGrade, cooldownMin)
@@ -266,7 +266,7 @@ func (m *Manager) Rotate(sessionID string, reason string) (*AcquireResponse, err
 	// 确认新代理可用后，再修改旧代理状态
 	m.cooldowns[oldProxyID] = now + int64(cfg.SessionRiskCooldownMin*60)
 	delete(m.byProxy, oldProxyID)
-	m.adjustGrade(oldProxyID, oldGrade, "risk_blocked", true)
+	m.recordProxyOutcome(oldProxyID, sess.ProxyAddress, oldGrade, "risk_blocked", true)
 
 	// 更新会话
 	sess.ProxyID = selected.ID
@@ -501,20 +501,15 @@ func (m *Manager) findCandidates(req AcquireRequest) ([]storage.Proxy, error) {
 
 	// 评分优先排序，同评分按延迟排序，加入随机扰动
 	sort.SliceStable(candidates, func(i, j int) bool {
-		ri := gradeRank(candidates[i].QualityGrade)
-		rj := gradeRank(candidates[j].QualityGrade)
-		if ri != rj {
-			return ri < rj
-		}
-		return candidates[i].Latency < candidates[j].Latency
+		return storage.CompareProxyQuality(candidates[i], candidates[j]) > 0
 	})
 
 	// 同评分内随机打散前 N 个
 	if len(candidates) > 1 {
-		topGrade := candidates[0].QualityGrade
+		topScore := candidates[0].QualityScore
 		sameCount := 0
 		for _, c := range candidates {
-			if c.QualityGrade == topGrade {
+			if c.QualityScore == topScore {
 				sameCount++
 			} else {
 				break
@@ -565,26 +560,12 @@ func (m *Manager) buildResponse(sess *Session) *AcquireResponse {
 	}
 }
 
-// adjustGrade 根据使用结果调整代理评分
-func (m *Manager) adjustGrade(proxyID int64, currentGrade, result string, riskDetected bool) string {
-	newGrade := currentGrade
-
-	if riskDetected || result == "risk_blocked" {
-		// 降一级
-		switch currentGrade {
-		case "S":
-			newGrade = "A"
-		case "A":
-			newGrade = "B"
-		case "B":
-			newGrade = "C"
-		}
+// recordProxyOutcome 根据使用结果重算代理综合质量
+func (m *Manager) recordProxyOutcome(proxyID int64, proxyAddress, currentGrade, result string, riskDetected bool) string {
+	_, newGrade, err := m.storage.RecordProxyOutcome(proxyID, proxyAddress, result, riskDetected)
+	if err != nil {
+		log.Printf("[session] record outcome failed: proxy=%s result=%s risk=%v err=%v", proxyAddress, result, riskDetected, err)
+		return currentGrade
 	}
-
-	if newGrade != currentGrade {
-		// 更新数据库中的评分
-		m.storage.GetDB().Exec(`UPDATE proxies SET quality_grade = ? WHERE id = ?`, newGrade, proxyID)
-	}
-
 	return newGrade
 }

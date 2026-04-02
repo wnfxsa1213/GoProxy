@@ -937,7 +937,8 @@ GoProxy WebUI 支持**访客模式**和**管理员模式**：
 ### 代理注册表
 
 **表格字段**
-- **Grade**：质量等级（S/A/B/C，基于延迟计算）
+- **Grade**：质量等级（S/A/B/C，由综合质量分映射）
+- **Score**：综合质量分（0-100，综合考虑延迟、成功率、失败记录、风险惩罚）
 - **Protocol**：协议类型（HTTP/SOCKS5）
 - **Address**：代理地址（host:port），点击可复制
 - **Exit IP**：代理的出口 IP 地址
@@ -1039,12 +1040,14 @@ Emergency (总数<10% 或 单协议缺失)
 
 ### 质量分级标准
 
-| 等级 | 延迟范围 | 说明 | 权重 |
+| 等级 | 综合质量分 | 说明 | 主导因子 |
 | --- | --- | --- | --- |
-| S | ≤500ms | 超快，优先使用，健康状态跳过检查 | 最高 |
-| A | 501-1000ms | 良好，稳定可用 | 高 |
-| B | 1001-2000ms | 可用，会被优化替换 | 中 |
-| C | >2000ms | 淘汰候选，优先替换 | 低 |
+| S | 85-100 | 综合质量最佳，优先使用，健康状态可跳过检查 | 延迟低且稳定性高 |
+| A | 70-84 | 质量良好，适合稳定使用 | 延迟与成功率平衡较好 |
+| B | 50-69 | 可用，但会被优化轮换重点关注 | 质量一般或历史样本不足 |
+| C | 0-49 | 淘汰候选，优先替换 | 延迟差、失败多或风险惩罚高 |
+
+> 综合质量分是系统内部评分，不依赖外部信誉站点；当前会综合 `latency`、`success_count`、`fail_count`、`risk_count` 等指标后，再映射为 `S/A/B/C`。
 
 ## 🔧 数据库 Schema
 
@@ -1059,6 +1062,8 @@ Emergency (总数<10% 或 单协议缺失)
 | `exit_location` | TEXT | 出口位置 |
 | `latency` | INTEGER | 延迟（毫秒） |
 | `quality_grade` | TEXT | 质量等级（S/A/B/C） |
+| `quality_score` | INTEGER | 综合质量分（0-100） |
+| `risk_count` | INTEGER | 风险事件累计次数 |
 | `use_count` | INTEGER | 使用次数 |
 | `success_count` | INTEGER | 成功次数 |
 | `fail_count` | INTEGER | 失败次数 |
@@ -1108,13 +1113,13 @@ Emergency (总数<10% 或 单协议缺失)
 2. **出口 IP 检测**：获取代理的出口 IP
 3. **地理位置查询**：获取出口 IP 的国家/城市
 4. **延迟测试**：测量连接延迟
-5. **质量评估**：根据延迟计算质量等级
+5. **质量评估**：根据延迟、成功率、失败记录、风险惩罚计算综合质量分，并映射为质量等级
 6. **HTTPS 隧道验证**（仅 HTTP 协议）：通过代理实际访问随机 HTTPS 网站（Google/OpenAI/GitHub/Cloudflare/httpbin），验证 CONNECT 隧道可用性，首次失败自动换站重试
 
 **入池判断逻辑**
 - ✅ 协议槽位未满：直接加入
 - ✅ 槽位满但总量允许10%浮动：浮动加入
-- 🔄 池子满且质量更优：替换延迟最高的现有代理（需快30%+）
+- 🔄 池子满且质量更优：优先替换综合质量最低的现有代理，同分时仍要求显著更低延迟
 - ❌ 池子满且质量不足：拒绝
 
 ### 2. 健康检查机制
@@ -1125,7 +1130,7 @@ Emergency (总数<10% 或 单协议缺失)
 - 池子健康时跳过 S 级代理（降低资源消耗）
 
 **检查结果处理**
-- ✅ 验证通过：更新延迟、出口 IP、质量等级
+- ✅ 验证通过：更新延迟、出口 IP、综合质量分与质量等级
 - ❌ 验证失败：失败计数 +1，≥3次自动删除
 
 ### 3. 优化轮换机制
@@ -1270,7 +1275,7 @@ A:
 
 ```bash
 # 查看当前代理
-sqlite3 data/proxy.db "SELECT address, protocol, latency, quality_grade, status FROM proxies LIMIT 10;"
+sqlite3 data/proxy.db "SELECT address, protocol, latency, quality_score, quality_grade, status FROM proxies LIMIT 10;"
 
 # 查看质量分布
 sqlite3 data/proxy.db "SELECT quality_grade, COUNT(*) FROM proxies WHERE status='active' GROUP BY quality_grade;"

@@ -20,6 +20,8 @@ type Proxy struct {
 	Timezone     string    `json:"timezone"`
 	Latency      int       `json:"latency"`
 	QualityGrade string    `json:"quality_grade"`
+	QualityScore int       `json:"quality_score"`
+	RiskCount    int       `json:"risk_count"`
 	UseCount     int       `json:"use_count"`
 	SuccessCount int       `json:"success_count"`
 	FailCount    int       `json:"fail_count"`
@@ -38,7 +40,7 @@ type SourceStatus struct {
 	ConsecutiveFails int
 	LastSuccess      time.Time
 	LastFail         time.Time
-	Status           string    // active/degraded/disabled
+	Status           string // active/degraded/disabled
 	DisabledUntil    time.Time
 }
 
@@ -52,6 +54,9 @@ type Storage struct {
 	db           *sql.DB
 	leaseChecker LeaseChecker
 }
+
+const proxySelectColumns = `id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade, quality_score, risk_count,
+		use_count, success_count, fail_count, last_used, last_check, created_at, status`
 
 // SetLeaseChecker 设置租约检查器（启动时由 main.go 注入）
 func (s *Storage) SetLeaseChecker(lc LeaseChecker) {
@@ -84,6 +89,8 @@ func (s *Storage) initSchema() error {
 			exit_location  TEXT NOT NULL DEFAULT '',
 			latency        INTEGER NOT NULL DEFAULT 0,
 			quality_grade  TEXT NOT NULL DEFAULT 'C',
+			quality_score  INTEGER NOT NULL DEFAULT 0,
+			risk_count     INTEGER NOT NULL DEFAULT 0,
 			use_count      INTEGER NOT NULL DEFAULT 0,
 			success_count  INTEGER NOT NULL DEFAULT 0,
 			fail_count     INTEGER NOT NULL DEFAULT 0,
@@ -100,6 +107,7 @@ func (s *Storage) initSchema() error {
 	// 创建索引
 	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_protocol_latency ON proxies(protocol, latency)`)
 	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_quality_grade ON proxies(quality_grade, latency)`)
+	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_quality_score ON proxies(quality_score, latency)`)
 	s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_status ON proxies(status)`)
 
 	// 创建源状态表
@@ -166,6 +174,22 @@ func (s *Storage) initSchema() error {
 	if hasQuality == 0 {
 		log.Println("[storage] migrating: adding quality_grade column")
 		s.db.Exec(`ALTER TABLE proxies ADD COLUMN quality_grade TEXT NOT NULL DEFAULT 'C'`)
+	}
+
+	// 迁移：添加综合质量分字段
+	var hasQualityScore int
+	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name='quality_score'`).Scan(&hasQualityScore)
+	if hasQualityScore == 0 {
+		log.Println("[storage] migrating: adding quality_score column")
+		s.db.Exec(`ALTER TABLE proxies ADD COLUMN quality_score INTEGER NOT NULL DEFAULT 0`)
+	}
+
+	// 迁移：添加风险计数字段
+	var hasRiskCount int
+	s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('proxies') WHERE name='risk_count'`).Scan(&hasRiskCount)
+	if hasRiskCount == 0 {
+		log.Println("[storage] migrating: adding risk_count column")
+		s.db.Exec(`ALTER TABLE proxies ADD COLUMN risk_count INTEGER NOT NULL DEFAULT 0`)
 	}
 
 	// 迁移：添加使用统计字段
@@ -235,7 +259,7 @@ func (s *Storage) initSchema() error {
 		return err
 	}
 
-	return nil
+	return s.backfillQualityScores()
 }
 
 // AddProxy 新增代理，已存在则忽略
@@ -248,7 +272,7 @@ func (s *Storage) AddProxy(address, protocol string) error {
 		log.Printf("[storage] AddProxy %s error: %v", address, err)
 		return err
 	}
-	
+
 	// 检查是否真的插入了
 	affected, _ := result.RowsAffected()
 	if affected == 0 {
@@ -300,19 +324,11 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 
 	// 优先从 S/A 级代理中随机选择
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
-		        use_count, success_count, fail_count, last_used, last_check, created_at, status
+		fmt.Sprintf(`SELECT %s
 		 FROM proxies
 		 WHERE status = 'active' AND fail_count < 3
-		 ORDER BY
-		   CASE quality_grade
-		     WHEN 'S' THEN 1
-		     WHEN 'A' THEN 2
-		     WHEN 'B' THEN 3
-		     ELSE 4
-		   END,
-		   RANDOM()
-		 LIMIT 10`,
+		 ORDER BY quality_score DESC, latency ASC, RANDOM()
+		 LIMIT 10`, proxySelectColumns),
 	)
 	if err != nil {
 		return nil, err
@@ -332,13 +348,18 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 	return nil, fmt.Errorf("no available proxy")
 }
 
+type proxyScanner interface {
+	Scan(dest ...interface{}) error
+}
+
 // scanProxy 扫描代理行数据
-func scanProxy(rows *sql.Rows) (*Proxy, error) {
+func scanProxy(scanner proxyScanner) (*Proxy, error) {
 	p := &Proxy{}
 	var lastUsed, lastCheck sql.NullTime
-	if err := rows.Scan(&p.ID, &p.Address, &p.Protocol, &p.ExitIP, &p.ExitLocation,
+	if err := scanner.Scan(&p.ID, &p.Address, &p.Protocol, &p.ExitIP, &p.ExitLocation,
 		&p.CountryCode, &p.Timezone,
-		&p.Latency, &p.QualityGrade, &p.UseCount, &p.SuccessCount, &p.FailCount,
+		&p.Latency, &p.QualityGrade, &p.QualityScore, &p.RiskCount,
+		&p.UseCount, &p.SuccessCount, &p.FailCount,
 		&lastUsed, &lastCheck, &p.CreatedAt, &p.Status); err != nil {
 		return nil, err
 	}
@@ -356,11 +377,10 @@ func (s *Storage) GetAll() ([]Proxy, error) {
 	leased := s.getLeasedSet()
 
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
-		        use_count, success_count, fail_count, last_used, last_check, created_at, status
+		fmt.Sprintf(`SELECT %s
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3
-		 ORDER BY latency ASC`,
+		 ORDER BY quality_score DESC, latency ASC`, proxySelectColumns),
 	)
 	if err != nil {
 		return nil, err
@@ -421,12 +441,18 @@ func (s *Storage) GetLowestLatencyExclude(excludes []string) (*Proxy, error) {
 		excludeMap[e] = true
 	}
 
-	// GetAll() 已经按 latency ASC 排序，找到第一个不在排除列表中的
+	var selected *Proxy
 	for _, p := range proxies {
 		if !excludeMap[p.Address] {
-			proxy := p
-			return &proxy, nil
+			if selected == nil || p.Latency < selected.Latency {
+				proxy := p
+				selected = &proxy
+			}
 		}
+	}
+
+	if selected != nil {
+		return selected, nil
 	}
 
 	return nil, fmt.Errorf("no available proxy")
@@ -471,12 +497,18 @@ func (s *Storage) GetLowestLatencyByProtocolExclude(protocol string, excludes []
 		excludeMap[e] = true
 	}
 
-	// GetAll() 已经按 latency ASC 排序，找到第一个匹配协议且不在排除列表中的
+	var selected *Proxy
 	for _, p := range proxies {
 		if p.Protocol == protocol && !excludeMap[p.Address] {
-			proxy := p
-			return &proxy, nil
+			if selected == nil || p.Latency < selected.Latency {
+				proxy := p
+				selected = &proxy
+			}
 		}
+	}
+
+	if selected != nil {
+		return selected, nil
 	}
 
 	return nil, fmt.Errorf("no %s proxy available", protocol)
@@ -503,7 +535,10 @@ func (s *Storage) IncrFail(address string) error {
 		`UPDATE proxies SET fail_count = fail_count + 1, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
 // ResetFail 重置失败次数（验证通过）
@@ -512,26 +547,34 @@ func (s *Storage) ResetFail(address string) error {
 		`UPDATE proxies SET fail_count = 0, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
 // UpdateLatency 更新代理的延迟信息（毫秒）
 func (s *Storage) UpdateLatency(address string, latencyMs int) error {
 	_, err := s.db.Exec(
-		`UPDATE proxies SET latency = ? WHERE address = ?`,
+		`UPDATE proxies SET latency = ?, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		latencyMs, address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
-// UpdateExitInfo 更新代理的出口 IP、位置、地理信息和质量等级
+// UpdateExitInfo 更新代理的出口 IP、位置、地理信息和综合质量
 func (s *Storage) UpdateExitInfo(address, exitIP, exitLocation string, latencyMs int, countryCode, timezone string) error {
-	grade := CalculateQualityGrade(latencyMs)
 	_, err := s.db.Exec(
-		`UPDATE proxies SET exit_ip = ?, exit_location = ?, country_code = ?, timezone = ?, latency = ?, quality_grade = ? WHERE address = ?`,
-		exitIP, exitLocation, countryCode, timezone, latencyMs, grade, address,
+		`UPDATE proxies SET exit_ip = ?, exit_location = ?, country_code = ?, timezone = ?, latency = ?, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
+		exitIP, exitLocation, countryCode, timezone, latencyMs, address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
 // RecordProxyUse 记录代理使用（成功）
@@ -542,27 +585,32 @@ func (s *Storage) RecordProxyUse(address string, success bool) error {
 			 last_used = CURRENT_TIMESTAMP WHERE address = ?`,
 			address,
 		)
-		return err
+		if err != nil {
+			return err
+		}
+		return s.recalculateQualityByAddress(address)
 	}
 	_, err := s.db.Exec(
 		`UPDATE proxies SET use_count = use_count + 1, fail_count = fail_count + 1, 
 		 last_used = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
 // GetWorstProxies 获取指定协议中延迟最高的N个代理
 func (s *Storage) GetWorstProxies(protocol string, limit int) ([]Proxy, error) {
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
-		        use_count, success_count, fail_count, last_used, last_check, created_at, status
+		fmt.Sprintf(`SELECT %s
 		 FROM proxies 
 		 WHERE protocol = ? AND status = 'active' 
 		   AND quality_grade != 'S'
 		   AND (JULIANDAY('now') - JULIANDAY(created_at)) * 1440 > 60
-		 ORDER BY latency DESC, fail_count DESC
-		 LIMIT ?`, protocol, limit,
+		 ORDER BY quality_score ASC, latency DESC, fail_count DESC
+		 LIMIT ?`, proxySelectColumns), protocol, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -605,11 +653,11 @@ func (s *Storage) ReplaceProxy(oldAddress string, newProxy Proxy) error {
 	}
 
 	// 添加新代理（带完整信息）
-	grade := CalculateQualityGrade(newProxy.Latency)
+	score, grade := CalculateQualitySnapshot(newProxy)
 	_, err = tx.Exec(
-		`INSERT INTO proxies (address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
-		newProxy.Address, newProxy.Protocol, newProxy.ExitIP, newProxy.ExitLocation, newProxy.CountryCode, newProxy.Timezone, newProxy.Latency, grade,
+		`INSERT INTO proxies (address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade, quality_score, risk_count, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active')`,
+		newProxy.Address, newProxy.Protocol, newProxy.ExitIP, newProxy.ExitLocation, newProxy.CountryCode, newProxy.Timezone, newProxy.Latency, grade, score, newProxy.RiskCount,
 	)
 	if err != nil {
 		return err
@@ -684,7 +732,7 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 	}
 
 	query := `SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
-		        use_count, success_count, fail_count, last_used, last_check, created_at, status
+		        quality_score, risk_count, use_count, success_count, fail_count, last_used, last_check, created_at, status
 		 FROM proxies
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3`
 
@@ -694,7 +742,8 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 
 	query += ` ORDER BY
 		COALESCE(last_check, '1970-01-01') ASC,
-		quality_grade DESC
+		quality_score DESC,
+		latency ASC
 		LIMIT ?`
 
 	rows, err := s.db.Query(query, fetchSize)
@@ -720,20 +769,6 @@ func (s *Storage) GetBatchForHealthCheck(batchSize int, skipSGrade bool) ([]Prox
 	return proxies, nil
 }
 
-// CalculateQualityGrade 根据延迟计算质量等级
-func CalculateQualityGrade(latencyMs int) string {
-	switch {
-	case latencyMs <= 500:
-		return "S" // 超快
-	case latencyMs <= 1000:
-		return "A" // 良好
-	case latencyMs <= 2000:
-		return "B" // 可用
-	default:
-		return "C" // 淘汰候选
-	}
-}
-
 // DeleteInvalid 删除失败次数超过阈值的代理
 func (s *Storage) DeleteInvalid(maxFailCount int) (int64, error) {
 	res, err := s.db.Exec(`DELETE FROM proxies WHERE fail_count >= ?`, maxFailCount)
@@ -748,7 +783,7 @@ func (s *Storage) DeleteBlockedCountries(countryCodes []string) (int64, error) {
 	if len(countryCodes) == 0 {
 		return 0, nil
 	}
-	
+
 	var totalDeleted int64
 	for _, code := range countryCodes {
 		// exit_location 格式：如 "CN Beijing" 或 "HK Hong Kong"
@@ -794,20 +829,22 @@ func (s *Storage) CountByProtocol(protocol string) (int, error) {
 // IncrementFailCount 增加失败次数
 func (s *Storage) IncrementFailCount(address string) error {
 	_, err := s.db.Exec(
-		`UPDATE proxies SET fail_count = fail_count + 1 WHERE address = ?`,
+		`UPDATE proxies SET fail_count = fail_count + 1, last_check = CURRENT_TIMESTAMP WHERE address = ?`,
 		address,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.recalculateQualityByAddress(address)
 }
 
 // GetByProtocol 按协议获取代理列表
 func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
 	rows, err := s.db.Query(
-		`SELECT id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade,
-		        use_count, success_count, fail_count, last_used, last_check, created_at, status
+		fmt.Sprintf(`SELECT %s
 		 FROM proxies 
 		 WHERE status IN ('active', 'degraded') AND fail_count < 3 AND protocol = ?
-		 ORDER BY latency ASC`, protocol,
+		 ORDER BY quality_score DESC, latency ASC`, proxySelectColumns), protocol,
 	)
 	if err != nil {
 		return nil, err
@@ -823,6 +860,77 @@ func (s *Storage) GetByProtocol(protocol string) ([]Proxy, error) {
 		proxies = append(proxies, *p)
 	}
 	return proxies, nil
+}
+
+// IncrementRiskCount 增加风险计数并重算质量
+func (s *Storage) IncrementRiskCount(proxyID int64) (int, string, error) {
+	_, err := s.db.Exec(`UPDATE proxies SET risk_count = risk_count + 1 WHERE id = ?`, proxyID)
+	if err != nil {
+		return 0, "", err
+	}
+	return s.recalculateQualityByID(proxyID)
+}
+
+// RecordProxyOutcome 记录代理使用结果并重算质量
+func (s *Storage) RecordProxyOutcome(proxyID int64, address, result string, riskDetected bool) (int, string, error) {
+	success := result == "success" && !riskDetected
+	if err := s.RecordProxyUse(address, success); err != nil {
+		return 0, "", err
+	}
+	if riskDetected || result == "risk_blocked" {
+		return s.IncrementRiskCount(proxyID)
+	}
+	return s.recalculateQualityByID(proxyID)
+}
+
+func (s *Storage) backfillQualityScores() error {
+	rows, err := s.db.Query(`SELECT id FROM proxies WHERE quality_score = 0`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+
+	for _, id := range ids {
+		if _, _, err := s.recalculateQualityByID(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Storage) recalculateQualityByAddress(address string) error {
+	_, _, err := s.recalculateQualityByLookup(`SELECT `+proxySelectColumns+` FROM proxies WHERE address = ?`, address)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	return err
+}
+
+func (s *Storage) recalculateQualityByID(proxyID int64) (int, string, error) {
+	return s.recalculateQualityByLookup(`SELECT `+proxySelectColumns+` FROM proxies WHERE id = ?`, proxyID)
+}
+
+func (s *Storage) recalculateQualityByLookup(query string, arg interface{}) (int, string, error) {
+	p, err := scanProxy(s.db.QueryRow(query, arg))
+	if err != nil {
+		return 0, "", err
+	}
+
+	score, grade := CalculateQualitySnapshot(*p)
+	_, err = s.db.Exec(`UPDATE proxies SET quality_score = ?, quality_grade = ? WHERE id = ?`, score, grade, p.ID)
+	if err != nil {
+		return 0, "", err
+	}
+	return score, grade, nil
 }
 
 // Close 关闭数据库

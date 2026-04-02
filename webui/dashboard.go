@@ -417,6 +417,7 @@ const i18n = {
     'proxy.loading': '加载中...',
     'proxy.empty': '暂无代理',
     'proxy.th_grade': '等级',
+    'proxy.th_score': '分数',
     'proxy.th_protocol': '协议',
     'proxy.th_address': '地址',
     'proxy.th_exit_ip': '出口IP',
@@ -491,6 +492,7 @@ const i18n = {
     'proxy.loading': 'Loading...',
     'proxy.empty': 'No proxies available',
     'proxy.th_grade': 'Grade',
+    'proxy.th_score': 'Score',
     'proxy.th_protocol': 'Protocol',
     'proxy.th_address': 'Address',
     'proxy.th_exit_ip': 'Exit IP',
@@ -769,6 +771,7 @@ function renderProxies(proxies) {
   } else {
     html = '<table><thead><tr>';
     html += '<th data-i18n="proxy.th_grade">' + t('proxy.th_grade') + '</th>';
+    html += '<th data-i18n="proxy.th_score">' + t('proxy.th_score') + '</th>';
     html += '<th data-i18n="proxy.th_protocol">' + t('proxy.th_protocol') + '</th>';
     html += '<th data-i18n="proxy.th_address">' + t('proxy.th_address') + '</th>';
     html += '<th data-i18n="proxy.th_exit_ip">' + t('proxy.th_exit_ip') + '</th>';
@@ -787,6 +790,7 @@ function renderProxies(proxies) {
       
       html += '<tr>';
       html += '<td class="cell-grade grade-' + grade + '">' + (p.quality_grade || 'C') + '</td>';
+      html += '<td class="cell-mono">' + ((p.quality_score || p.quality_score === 0) ? p.quality_score : '—') + '</td>';
       html += '<td><span class="badge badge-' + p.protocol + '">' + p.protocol.toUpperCase() + '</span></td>';
       html += '<td class="cell-mono cell-clickable" onclick="copyToClipboard(\'' + p.address + '\')" title="点击复制">' + p.address + '</td>';
       html += '<td class="cell-mono">' + (p.exit_ip || '—') + '</td>';

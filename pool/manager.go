@@ -22,12 +22,12 @@ func NewManager(s *storage.Storage, cfg *config.Config) *Manager {
 
 // PoolStatus 池子状态
 type PoolStatus struct {
-	Total        int
-	HTTP         int
-	SOCKS5       int
-	HTTPSlots    int
-	SOCKS5Slots  int
-	State        string // healthy/warning/critical/emergency
+	Total            int
+	HTTP             int
+	SOCKS5           int
+	HTTPSlots        int
+	SOCKS5Slots      int
+	State            string // healthy/warning/critical/emergency
 	AvgLatencyHTTP   int
 	AvgLatencySocks5 int
 }
@@ -131,6 +131,10 @@ func (m *Manager) NeedsFetchQuick(status *PoolStatus) bool {
 
 // TryAddProxy 尝试将代理加入池子
 func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
+	score, grade := storage.CalculateQualitySnapshot(p)
+	p.QualityScore = score
+	p.QualityGrade = grade
+
 	httpSlots, socks5Slots := m.cfg.CalculateSlots()
 	httpCount, _ := m.storage.CountByProtocol("http")
 	socks5Count, _ := m.storage.CountByProtocol("socks5")
@@ -153,8 +157,8 @@ func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
 		}
 		// 更新完整信息
 		m.storage.UpdateExitInfo(p.Address, p.ExitIP, p.ExitLocation, p.Latency, p.CountryCode, p.Timezone)
-		log.Printf("[pool] ✅ 直接入池: %s (%s %d/%d) %dms %s %s",
-			p.Address, p.Protocol, currentCount+1, maxSlots, p.Latency, p.ExitIP, p.ExitLocation)
+		log.Printf("[pool] ✅ 直接入池: %s (%s %d/%d) %dms score=%d grade=%s %s %s",
+			p.Address, p.Protocol, currentCount+1, maxSlots, p.Latency, p.QualityScore, p.QualityGrade, p.ExitIP, p.ExitLocation)
 		return true, "added"
 	}
 
@@ -165,8 +169,8 @@ func (m *Manager) TryAddProxy(p storage.Proxy) (bool, string) {
 			return false, "db_error"
 		}
 		m.storage.UpdateExitInfo(p.Address, p.ExitIP, p.ExitLocation, p.Latency, p.CountryCode, p.Timezone)
-		log.Printf("[pool] ✅ 浮动入池: %s (%s %d/%d+%d) %dms",
-			p.Address, p.Protocol, currentCount+1, maxSlots, allowedFloat, p.Latency)
+		log.Printf("[pool] ✅ 浮动入池: %s (%s %d/%d+%d) %dms score=%d grade=%s",
+			p.Address, p.Protocol, currentCount+1, maxSlots, allowedFloat, p.Latency, p.QualityScore, p.QualityGrade)
 		return true, "added_float"
 	}
 
@@ -188,15 +192,20 @@ func (m *Manager) tryReplace(newProxy storage.Proxy) (bool, string) {
 
 	worst := candidates[0]
 
-	// 判断是否值得替换：新代理需要显著更快
+	// 判断是否值得替换：综合质量更优优先，同分时仍要求显著更快
 	threshold := m.cfg.ReplaceThreshold
-	if float64(newProxy.Latency) < float64(worst.Latency)*threshold {
+	if storage.CompareProxyQuality(newProxy, worst) > 0 && (newProxy.QualityScore > worst.QualityScore || float64(newProxy.Latency) < float64(worst.Latency)*threshold) {
 		if err := m.storage.ReplaceProxy(worst.Address, newProxy); err != nil {
 			return false, "replace_error"
 		}
-		log.Printf("[pool] 🔄 替换: %s(%dms) → %s(%dms) 提升%.0f%%",
-			worst.Address, worst.Latency, newProxy.Address, newProxy.Latency,
-			(1-float64(newProxy.Latency)/float64(worst.Latency))*100)
+		improvement := 0.0
+		if worst.Latency > 0 && newProxy.Latency > 0 {
+			improvement = (1 - float64(newProxy.Latency)/float64(worst.Latency)) * 100
+		}
+		log.Printf("[pool] 🔄 替换: %s(score=%d grade=%s %dms) → %s(score=%d grade=%s %dms) 提升%.0f%%",
+			worst.Address, worst.QualityScore, worst.QualityGrade, worst.Latency,
+			newProxy.Address, newProxy.QualityScore, newProxy.QualityGrade, newProxy.Latency,
+			improvement)
 		return true, "replaced"
 	}
 

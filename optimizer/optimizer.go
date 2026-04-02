@@ -63,20 +63,26 @@ func (o *Optimizer) RunOnce() {
 	for result := range o.validator.ValidateStream(candidates) {
 		if result.Valid {
 			latencyMs := int(result.Latency.Milliseconds())
+			candidate := storage.Proxy{
+				Address:      result.Proxy.Address,
+				Protocol:     result.Proxy.Protocol,
+				ExitIP:       result.ExitIP,
+				ExitLocation: result.ExitLocation,
+				CountryCode:  result.CountryCode,
+				Timezone:     result.Timezone,
+				Latency:      latencyMs,
+			}
+			score, grade := storage.CalculateQualitySnapshot(candidate)
+			candidate.QualityScore = score
+			candidate.QualityGrade = grade
 			// 只保留延迟在健康标准内的
-			if latencyMs <= o.cfg.MaxLatencyHealthy {
-				validCandidates = append(validCandidates, storage.Proxy{
-					Address:      result.Proxy.Address,
-					Protocol:     result.Proxy.Protocol,
-					ExitIP:       result.ExitIP,
-					ExitLocation: result.ExitLocation,
-					Latency:      latencyMs,
-				})
+			if latencyMs <= o.cfg.MaxLatencyHealthy && score >= 60 {
+				validCandidates = append(validCandidates, candidate)
 			}
 		}
 	}
 
-	log.Printf("[optimize] 验证通过 %d 个优质候选（延迟<%dms）", len(validCandidates), o.cfg.MaxLatencyHealthy)
+	log.Printf("[optimize] 验证通过 %d 个优质候选（延迟<%dms 且 score>=60）", len(validCandidates), o.cfg.MaxLatencyHealthy)
 
 	if len(validCandidates) == 0 {
 		log.Println("[optimize] 无优质候选，跳过优化")
