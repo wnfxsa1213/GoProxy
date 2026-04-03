@@ -86,13 +86,9 @@ func getExitIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, time
 	return result.Query, location, result.CountryCode, result.Timezone
 }
 
-// HTTPS 测试目标列表，随机选一个验证代理的 CONNECT 隧道能力
+// HTTPS 测试目标列表，当前仅允许通过 OpenAI 站点验证
 var httpsTestTargets = []string{
-	"https://www.google.com",
 	"https://www.openai.com",
-	"https://www.github.com",
-	"https://www.cloudflare.com",
-	"https://httpbin.org/ip",
 }
 
 // checkHTTPSReachability 通过代理实际访问 HTTPS 站点，验证 TLS 握手和证书链可信性。
