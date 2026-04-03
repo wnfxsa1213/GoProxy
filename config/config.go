@@ -69,8 +69,8 @@ type Config struct {
 	ValidateURL         string // 验证目标 URL
 
 	// ========== 健康检查配置 ==========
-	HealthCheckInterval   int // 状态监控间隔（分钟）（默认5）
-	HealthCheckBatchSize  int // 每批验证数量（默认20）
+	HealthCheckInterval    int // 状态监控间隔（分钟）（默认5）
+	HealthCheckBatchSize   int // 每批验证数量（默认20）
 	HealthCheckConcurrency int // 批次内并发数（默认50）
 
 	// ========== 优化配置 ==========
@@ -123,7 +123,7 @@ func DefaultConfig() *Config {
 	if password == "" {
 		password = DefaultPassword
 	}
-	
+
 	// 读取代理认证配置
 	proxyAuthEnabled := os.Getenv("PROXY_AUTH_ENABLED") == "true"
 	proxyAuthUsername := os.Getenv("PROXY_AUTH_USERNAME")
@@ -135,7 +135,7 @@ func DefaultConfig() *Config {
 	if proxyAuthPassword != "" {
 		proxyAuthHash = passwordHash(proxyAuthPassword)
 	}
-	
+
 	// 读取地理过滤配置
 	blockedCountries := []string{"CN"} // 默认屏蔽中国大陆
 	if blockedEnv := os.Getenv("BLOCKED_COUNTRIES"); blockedEnv != "" {
@@ -149,7 +149,7 @@ func DefaultConfig() *Config {
 			}
 		}
 	}
-	
+
 	// 读取 Session API 配置
 	sessionAPIKey := os.Getenv("SESSION_API_KEY")
 	sessionAdvertiseHost := os.Getenv("SESSION_ADVERTISE_HOST")
@@ -163,20 +163,20 @@ func DefaultConfig() *Config {
 		SOCKS5Port:        ":7779",
 		StableSOCKS5Port:  ":7780",
 		DBPath:            dataDir() + "proxy.db",
-		
+
 		// 代理认证配置
 		ProxyAuthEnabled:      proxyAuthEnabled,
 		ProxyAuthUsername:     proxyAuthUsername,
 		ProxyAuthPassword:     proxyAuthPassword,
 		ProxyAuthPasswordHash: proxyAuthHash,
-		
+
 		// 地理过滤配置
 		BlockedCountries: blockedCountries,
 
 		// 池子容量配置
-		PoolMaxSize:        100,  // 总容量
-		PoolHTTPRatio:      0.3,  // HTTP占30%
-		PoolMinPerProtocol: 10,   // 每协议最少10个
+		PoolMaxSize:        100, // 总容量
+		PoolHTTPRatio:      0.3, // HTTP占30%
+		PoolMinPerProtocol: 10,  // 每协议最少10个
 
 		// 延迟标准配置
 		MaxLatencyMs:          2500, // 标准2.5秒
@@ -208,12 +208,12 @@ func DefaultConfig() *Config {
 		SourceCooldownMinutes:  30, // 禁用30分钟
 
 		// 兼容旧配置
-		MaxResponseMs: 5000,
-		MaxFailCount:  3,
-		MaxRetry:      3,
-		FetchInterval: 30,
-		CheckInterval: 10,
-		HTTPSourceURL: "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt",
+		MaxResponseMs:   5000,
+		MaxFailCount:    3,
+		MaxRetry:        3,
+		FetchInterval:   30,
+		CheckInterval:   10,
+		HTTPSourceURL:   "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/http.txt",
 		SOCKS5SourceURL: "https://cdn.jsdelivr.net/gh/databay-labs/free-proxy-list/socks5.txt",
 
 		// Session-Sticky 配置

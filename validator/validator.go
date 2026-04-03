@@ -57,8 +57,20 @@ type Result struct {
 
 // getExitIPInfo 通过代理获取出口 IP 和地理位置
 func getExitIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, timezone string) {
-	// 使用 ip-api.com 返回 JSON 格式的 IP 信息
-	resp, err := client.Get("http://ip-api.com/json/?fields=status,country,countryCode,city,query,timezone")
+	if ip, location, code, tz := tryIPAPI(client); ip != "" {
+		return ip, location, code, tz
+	}
+	if ip, location, code, tz := tryIPAPICo(client); ip != "" {
+		return ip, location, code, tz
+	}
+	if ip, location, code, tz := tryIPInfo(client); ip != "" {
+		return ip, location, code, tz
+	}
+	return "", "", "", ""
+}
+
+func tryIPAPI(client *http.Client) (exitIP, exitLocation, countryCode, timezone string) {
+	resp, err := client.Get(ipAPIQueryURL)
 	if err != nil {
 		return "", "", "", ""
 	}
@@ -86,10 +98,91 @@ func getExitIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, time
 	return result.Query, location, result.CountryCode, result.Timezone
 }
 
-// HTTPS 测试目标列表，当前仅允许通过 OpenAI 站点验证
-var httpsTestTargets = []string{
-	"https://www.openai.com",
+func tryIPAPICo(client *http.Client) (exitIP, exitLocation, countryCode, timezone string) {
+	resp, err := client.Get(ipAPICoQueryURL)
+	if err != nil {
+		return "", "", "", ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		IP          string `json:"ip"`
+		City        string `json:"city"`
+		CountryCode string `json:"country_code"`
+		Timezone    string `json:"timezone"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.IP == "" {
+		return "", "", "", ""
+	}
+
+	location := result.CountryCode
+	if result.City != "" {
+		location = fmt.Sprintf("%s %s", result.CountryCode, result.City)
+	}
+
+	return result.IP, location, result.CountryCode, result.Timezone
 }
+
+func tryIPInfo(client *http.Client) (exitIP, exitLocation, countryCode, timezone string) {
+	resp, err := client.Get(ipInfoQueryURL)
+	if err != nil {
+		return "", "", "", ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		IP       string `json:"ip"`
+		City     string `json:"city"`
+		Country  string `json:"country"`
+		Timezone string `json:"timezone"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil || result.IP == "" {
+		return "", "", "", ""
+	}
+
+	location := result.Country
+	if result.City != "" {
+		location = fmt.Sprintf("%s %s", result.Country, result.City)
+	}
+
+	return result.IP, location, result.Country, result.Timezone
+}
+
+func tryHTTPBinIP(client *http.Client) string {
+	resp, err := client.Get(httpBinIPURL)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Origin string `json:"origin"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return ""
+	}
+
+	return result.Origin
+}
+
+// HTTPS 测试目标列表，随机抽样验证真实 HTTPS 站点可达性
+var httpsTestTargets = []string{
+	"https://www.google.com",
+	"https://www.openai.com",
+	"https://www.github.com",
+	"https://www.cloudflare.com",
+	"https://httpbin.org/ip",
+}
+
+var (
+	ipAPIQueryURL   = "http://ip-api.com/json/?fields=status,country,countryCode,city,query,timezone"
+	ipAPICoQueryURL = "https://ipapi.co/json/"
+	ipInfoQueryURL  = "https://ipinfo.io/json"
+	httpBinIPURL    = "https://httpbin.org/ip"
+)
 
 // checkHTTPSReachability 通过代理实际访问 HTTPS 站点，验证 TLS 握手和证书链可信性。
 // 首次失败会换一个目标重试一次，避免目标网站偶尔抽风导致误杀。
@@ -189,7 +282,7 @@ func (v *Validator) ValidateOne(p storage.Proxy) (bool, time.Duration, string, s
 	// 获取出口 IP 和地理位置（仅在验证通过时）
 	exitIP, exitLocation, countryCode, timezone := getExitIPInfo(client)
 
-	// 必须能获取到出口信息
+	// 必须能获取到完整出口信息
 	if exitIP == "" || exitLocation == "" {
 		return false, latency, exitIP, exitLocation, countryCode, timezone
 	}

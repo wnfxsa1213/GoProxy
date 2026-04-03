@@ -1116,7 +1116,7 @@ Emergency (总数<10% 或 单协议缺失)
 3. **地理位置查询**：获取出口 IP 的国家/城市
 4. **延迟测试**：测量连接延迟
 5. **质量评估**：根据延迟、成功率、失败记录、风险惩罚计算综合质量分，并映射为质量等级
-6. **HTTPS/OpenAI 验证**：通过代理实际访问 `https://www.openai.com`，要求 TLS 握手和证书链校验通过，作为 HTTPS/SOCKS5 代理的最终准入条件
+6. **HTTPS 抽样验证**：通过代理随机访问真实 HTTPS 站点（Google / OpenAI / GitHub / Cloudflare / httpbin），要求 TLS 握手和证书链校验通过，作为 HTTPS/SOCKS5 代理的最终准入条件
 
 **入池判断逻辑**
 - ✅ 协议槽位未满：直接加入

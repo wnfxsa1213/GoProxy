@@ -6,12 +6,21 @@ import (
 	"testing"
 )
 
-func TestDefaultHTTPSTargetsUseOpenAIOnly(t *testing.T) {
-	if len(httpsTestTargets) != 1 {
-		t.Fatalf("httpsTestTargets len = %d, want 1", len(httpsTestTargets))
+func TestDefaultHTTPSTargetsUseSampledSites(t *testing.T) {
+	want := []string{
+		"https://www.google.com",
+		"https://www.openai.com",
+		"https://www.github.com",
+		"https://www.cloudflare.com",
+		"https://httpbin.org/ip",
 	}
-	if httpsTestTargets[0] != "https://www.openai.com" {
-		t.Fatalf("httpsTestTargets[0] = %s", httpsTestTargets[0])
+	if len(httpsTestTargets) != len(want) {
+		t.Fatalf("httpsTestTargets len = %d, want %d", len(httpsTestTargets), len(want))
+	}
+	for i, target := range want {
+		if httpsTestTargets[i] != target {
+			t.Fatalf("httpsTestTargets[%d] = %s, want %s", i, httpsTestTargets[i], target)
+		}
 	}
 }
 

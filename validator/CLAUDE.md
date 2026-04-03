@@ -24,8 +24,8 @@
 3. 检查响应时间是否超过 `maxResponseMs`
 4. 通过代理访问 ip-api.com 获取出口 IP 和地理位置
 5. 过滤屏蔽国家出口（根据 BlockedCountries 配置）
-6. 可分配代理额外检测: 访问 OpenAI 验证 HTTPS 连通性
-   - 测试目标: https://www.openai.com
+6. 可分配代理额外检测: 随机访问真实 HTTPS 站点验证连通性
+   - 测试目标: Google / OpenAI / GitHub / Cloudflare / httpbin
    - 要求 TLS 握手和证书链校验通过
 
 ## 关键依赖与配置

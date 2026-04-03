@@ -21,9 +21,9 @@ type Source struct {
 // 快速更新源（5-30分钟更新）- 用于紧急和补充模式
 var fastUpdateSources = []Source{
 	// proxifly - 每5分钟更新
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/http/data.txt", "http"},
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/socks4/data.txt", "socks5"},
-	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/socks5/data.txt", "socks5"},
+	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/http/data.txt", "http"},
+	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks4/data.txt", "socks5"},
+	{"https://cdn.jsdelivr.net/gh/proxifly/free-proxy-list@main/proxies/protocols/socks5/data.txt", "socks5"},
 	// ProxyScraper - 每30分钟更新
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/http.txt", "http"},
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks4.txt", "socks5"},
