@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -27,18 +28,21 @@ type Manager struct {
 	store   *Store
 	storage *storage.Storage
 	cfg     *config.Config
+
+	probeCandidate func(storage.Proxy) error
 }
 
 // NewManager 创建会话管理器
 func NewManager(store *Store, s *storage.Storage, cfg *config.Config) *Manager {
 	m := &Manager{
-		sessions:  make(map[string]*Session),
-		byProxy:   make(map[int64]string),
-		byTask:    make(map[string]string),
-		cooldowns: make(map[int64]int64),
-		store:     store,
-		storage:   s,
-		cfg:       cfg,
+		sessions:       make(map[string]*Session),
+		byProxy:        make(map[int64]string),
+		byTask:         make(map[string]string),
+		cooldowns:      make(map[int64]int64),
+		store:          store,
+		storage:        s,
+		cfg:            cfg,
+		probeCandidate: probeCandidateReachability,
 	}
 
 	// 恢复活跃会话
@@ -117,8 +121,10 @@ func (m *Manager) Acquire(req AcquireRequest) (*AcquireResponse, error) {
 		return nil, fmt.Errorf("no_available_proxy")
 	}
 
-	// 选择最优代理
-	selected := candidates[0]
+	selected, err := m.selectCandidate(candidates)
+	if err != nil {
+		return nil, err
+	}
 
 	// 创建会话
 	now := time.Now().Unix()
@@ -558,6 +564,38 @@ func (m *Manager) buildResponse(sess *Session) *AcquireResponse {
 		LastReleasedAt: lastReleased,
 		ExpiresAt:      sess.ExpiresAt,
 	}
+}
+
+func (m *Manager) selectCandidate(candidates []storage.Proxy) (storage.Proxy, error) {
+	for _, candidate := range candidates {
+		if err := m.probeCandidate(candidate); err != nil {
+			log.Printf("[session] acquire: 跳过不可达上游 proxy=%s protocol=%s err=%v",
+				candidate.Address, candidate.Protocol, err)
+			if err := m.storage.IncrementFailCount(candidate.Address); err != nil {
+				log.Printf("[session] acquire: 记录上游失败 proxy=%s err=%v", candidate.Address, err)
+			}
+			continue
+		}
+		return candidate, nil
+	}
+	return storage.Proxy{}, fmt.Errorf("no_available_proxy")
+}
+
+func probeCandidateReachability(candidate storage.Proxy) error {
+	cfg := config.Get()
+	timeout := 3 * time.Second
+	if cfg != nil && cfg.ValidateTimeout > 0 {
+		timeout = time.Duration(cfg.ValidateTimeout) * time.Second
+		if timeout > 3*time.Second {
+			timeout = 3 * time.Second
+		}
+	}
+
+	conn, err := net.DialTimeout("tcp", candidate.Address, timeout)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // recordProxyOutcome 根据使用结果重算代理综合质量

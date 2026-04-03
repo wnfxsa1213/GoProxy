@@ -2,9 +2,12 @@ package storage
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
+	"sort"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -51,8 +54,9 @@ type LeaseChecker interface {
 }
 
 type Storage struct {
-	db           *sql.DB
-	leaseChecker LeaseChecker
+	db             *sql.DB
+	leaseChecker   LeaseChecker
+	probeCandidate func(Proxy) error
 }
 
 const proxySelectColumns = `id, address, protocol, exit_ip, exit_location, country_code, timezone, latency, quality_grade, quality_score, risk_count,
@@ -71,7 +75,10 @@ func New(dbPath string) (*Storage, error) {
 
 	db.SetMaxOpenConns(1) // SQLite 单写
 
-	s := &Storage{db: db}
+	s := &Storage{
+		db:             db,
+		probeCandidate: probeProxyReachability,
+	}
 	if err := s.initSchema(); err != nil {
 		return nil, err
 	}
@@ -335,6 +342,7 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 	}
 	defer rows.Close()
 
+	var candidates []Proxy
 	for rows.Next() {
 		p, err := scanProxy(rows)
 		if err != nil {
@@ -343,9 +351,9 @@ func (s *Storage) GetRandom() (*Proxy, error) {
 		if leased != nil && leased[p.ID] {
 			continue
 		}
-		return p, nil
+		candidates = append(candidates, *p)
 	}
-	return nil, fmt.Errorf("no available proxy")
+	return s.nextReachableProxy(candidates, "no available proxy")
 }
 
 type proxyScanner interface {
@@ -425,8 +433,10 @@ func (s *Storage) GetRandomExclude(excludes []string) (*Proxy, error) {
 		return s.GetRandom()
 	}
 
-	p := available[rand.Intn(len(available))]
-	return &p, nil
+	rand.Shuffle(len(available), func(i, j int) {
+		available[i], available[j] = available[j], available[i]
+	})
+	return s.nextReachableProxy(available, "no available proxy")
 }
 
 // GetLowestLatencyExclude 排除指定地址后获取延迟最低的代理
@@ -441,21 +451,45 @@ func (s *Storage) GetLowestLatencyExclude(excludes []string) (*Proxy, error) {
 		excludeMap[e] = true
 	}
 
-	var selected *Proxy
+	var available []Proxy
 	for _, p := range proxies {
 		if !excludeMap[p.Address] {
-			if selected == nil || p.Latency < selected.Latency {
-				proxy := p
-				selected = &proxy
-			}
+			available = append(available, p)
 		}
 	}
+	sort.SliceStable(available, func(i, j int) bool {
+		return available[i].Latency < available[j].Latency
+	})
+	return s.nextReachableProxy(available, "no available proxy")
+}
 
-	if selected != nil {
-		return selected, nil
+func (s *Storage) nextReachableProxy(candidates []Proxy, errMsg string) (*Proxy, error) {
+	for _, candidate := range candidates {
+		if err := s.probeCandidate(candidate); err != nil {
+			log.Printf("[storage] 跳过不可达代理: %s err=%v", candidate.Address, err)
+			if incErr := s.IncrementFailCount(candidate.Address); incErr != nil {
+				log.Printf("[storage] 记录代理失败: %s err=%v", candidate.Address, incErr)
+			}
+			if candidate.FailCount+1 >= 3 {
+				if delErr := s.Delete(candidate.Address); delErr != nil {
+					log.Printf("[storage] 删除失活代理失败: %s err=%v", candidate.Address, delErr)
+				}
+			}
+			continue
+		}
+		proxy := candidate
+		return &proxy, nil
 	}
 
-	return nil, fmt.Errorf("no available proxy")
+	return nil, errors.New(errMsg)
+}
+
+func probeProxyReachability(candidate Proxy) error {
+	conn, err := net.DialTimeout("tcp", candidate.Address, 3*time.Second)
+	if err != nil {
+		return err
+	}
+	return conn.Close()
 }
 
 // GetRandomByProtocolExclude 按协议获取随机代理（排除已尝试的）
@@ -481,8 +515,10 @@ func (s *Storage) GetRandomByProtocolExclude(protocol string, excludes []string)
 		return nil, fmt.Errorf("no %s proxy available", protocol)
 	}
 
-	proxy := available[time.Now().UnixNano()%int64(len(available))]
-	return &proxy, nil
+	rand.Shuffle(len(available), func(i, j int) {
+		available[i], available[j] = available[j], available[i]
+	})
+	return s.nextReachableProxy(available, fmt.Sprintf("no %s proxy available", protocol))
 }
 
 // GetLowestLatencyByProtocolExclude 按协议获取最低延迟代理（排除已尝试的）
@@ -497,21 +533,16 @@ func (s *Storage) GetLowestLatencyByProtocolExclude(protocol string, excludes []
 		excludeMap[e] = true
 	}
 
-	var selected *Proxy
+	var available []Proxy
 	for _, p := range proxies {
 		if p.Protocol == protocol && !excludeMap[p.Address] {
-			if selected == nil || p.Latency < selected.Latency {
-				proxy := p
-				selected = &proxy
-			}
+			available = append(available, p)
 		}
 	}
-
-	if selected != nil {
-		return selected, nil
-	}
-
-	return nil, fmt.Errorf("no %s proxy available", protocol)
+	sort.SliceStable(available, func(i, j int) bool {
+		return available[i].Latency < available[j].Latency
+	})
+	return s.nextReachableProxy(available, fmt.Sprintf("no %s proxy available", protocol))
 }
 
 // Delete 立即删除指定代理

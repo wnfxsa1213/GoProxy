@@ -1088,12 +1088,14 @@ Emergency (总数<10% 或 单协议缺失)
 
 ## 🔍 代理源
 
-系统内置 16 个代理源，分为快更新和慢更新两组：
+系统内置 18 个代理源，分为快更新和慢更新两组：
 
 **快更新源（5-30分钟更新）**
 - proxifly/free-proxy-list (HTTP/SOCKS4/SOCKS5)
 - ProxyScraper/ProxyScraper (HTTP/SOCKS4/SOCKS5)
 - monosans/proxy-list (HTTP)
+- komutan234/Proxy-List-Free (HTTP/SOCKS4/SOCKS5)
+- iplocate/free-proxy-list (HTTP/HTTPS/SOCKS4/SOCKS5)
 
 **慢更新源（每天更新）**
 - TheSpeedX/SOCKS-List (HTTP/SOCKS4/SOCKS5)

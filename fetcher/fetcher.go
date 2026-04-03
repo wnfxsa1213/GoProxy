@@ -30,6 +30,12 @@ var fastUpdateSources = []Source{
 	{"https://raw.githubusercontent.com/ProxyScraper/ProxyScraper/main/socks5.txt", "socks5"},
 	// monosans - 每小时更新
 	{"https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt", "http"},
+	// komutan234 - 每1-2分钟更新
+	{"https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/http.txt", "http"},
+	{"https://raw.githubusercontent.com/komutan234/Proxy-List-Free/main/proxies/socks5.txt", "socks5"},
+	// iplocate - 每30分钟更新
+	{"https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt", "http"},
+	{"https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/socks5.txt", "socks5"},
 }
 
 // 慢速更新源（每天更新）- 用于优化轮换模式

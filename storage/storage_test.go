@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -58,6 +59,48 @@ func TestUpdateExitInfoAndOutcomeRecalculateQuality(t *testing.T) {
 	proxy = mustFindProxy(t, store, address)
 	if proxy.RiskCount != 1 {
 		t.Fatalf("risk_count = %d, want 1", proxy.RiskCount)
+	}
+}
+
+func TestGetLowestLatencyExcludeSkipsUnreachableProxy(t *testing.T) {
+	t.Parallel()
+
+	store := newTestStorage(t)
+	badAddress := "127.0.0.1:8080"
+	goodAddress := "127.0.0.1:8081"
+
+	if err := store.AddProxy(badAddress, "socks5"); err != nil {
+		t.Fatalf("add bad proxy: %v", err)
+	}
+	if err := store.UpdateExitInfo(badAddress, "1.1.1.1", "US Bad", 120, "US", "UTC"); err != nil {
+		t.Fatalf("update bad proxy: %v", err)
+	}
+
+	if err := store.AddProxy(goodAddress, "socks5"); err != nil {
+		t.Fatalf("add good proxy: %v", err)
+	}
+	if err := store.UpdateExitInfo(goodAddress, "2.2.2.2", "US Good", 800, "US", "UTC"); err != nil {
+		t.Fatalf("update good proxy: %v", err)
+	}
+
+	store.probeCandidate = func(proxy Proxy) error {
+		if proxy.Address == badAddress {
+			return errors.New("dial tcp: i/o timeout")
+		}
+		return nil
+	}
+
+	selected, err := store.GetLowestLatencyExclude(nil)
+	if err != nil {
+		t.Fatalf("select proxy: %v", err)
+	}
+	if selected.Address != goodAddress {
+		t.Fatalf("selected proxy = %s, want %s", selected.Address, goodAddress)
+	}
+
+	bad := mustFindProxy(t, store, badAddress)
+	if bad.FailCount != 1 {
+		t.Fatalf("bad proxy fail_count = %d, want 1", bad.FailCount)
 	}
 }
 
